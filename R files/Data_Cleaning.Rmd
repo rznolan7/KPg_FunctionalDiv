@@ -190,9 +190,7 @@ remove_data <- rbind(no_gos$occurrence_no)
 #remove occs that got put in the "remove data" pile
 mollusca_cleaned <- mollusca[!mollusca$occurrence_no %in% remove_data$occurrence_no]
 
-#change occs that got filtered to correct entries
-mollusca_cleaned <- mollusca_cleaned[!mollusca_cleaned$occurrence_no %in% altered_data$occurrence_no] #delete original rows
-mollusca_cleaned <- rbind(mollusca_cleaned, altered_data) #row bind altered rows
+
 
 ```
 

@@ -34,13 +34,14 @@ rm(me, packs, i) #clean env
 ##Loading Data
 
 ```{r}
-#set wd to source file path
-wd <- dirname(rstudioapi::getSourceEditorContext()$path)
+#set wd to source file directory
+wd <- dirname(dirname(rstudioapi::getSourceEditorContext()$path))
 setwd(wd)
 
-#read in csv files
-csv_file <- paste0(wd, "/", "pbdb_data.csv")
-mollusca <- read.csv(csv_file, skip = 22)
+#set various directory
+path <- paste0(wd, "/Data/pbdb_mollusca.RData")
+#load data
+load(file = path)
 
 #list of columns that are available
 cols <- colnames(mollusca)
