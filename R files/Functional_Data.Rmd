@@ -1,0 +1,604 @@
+---
+title: "FunctionalKPg"
+output: html_document
+date: "2026-01-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{R}
+#install necessary packages
+if (!require(rstudioapi)){install.packages("rstudioapi")}
+me <- (rstudioapi::getActiveDocumentContext()$path) #get current file name
+
+if (!require(renv)){ install.packages("renv")}
+
+#because I use an old version of iNEXT
+if(!require(iNEXT)){remotes::install_version("iNEXT", version = "2.0.20")}
+
+packs <- unique(renv::dependencies(me)$Package) #list of packages needed 
+
+for (i in seq_along(packs)){
+  if (!require(packs[i], character.only=T)){ #install any missing pacls
+    install.packages(packs[i])
+  }
+}
+
+lapply(packs, library, character.only=T) #load packages
+
+rm(me, packs, i) #clean env
+```
+
+##Loading Data
+
+```{r}
+#set wd to source file path
+wd <- dirname(rstudioapi::getSourceEditorContext()$path)
+setwd(wd)
+
+#read in csv files
+csv_file <- paste0(wd, "/", "pbdb_data.csv")
+mollusca <- read.csv(csv_file, skip = 22)
+
+#list of columns that are available
+cols <- colnames(mollusca)
+
+#select columns of interest
+library(dplyr)
+occs <- mollusca %>% select(
+  occurrence_no,
+  accepted_name,
+  accepted_rank,
+  early_interval,
+  late_interval,
+  max_ma,
+  min_ma,
+  family,
+  genus, 
+  abund_value,
+  abund_unit,
+  lng,
+  lat,
+  paleolng,
+  paleolat,
+  environment,
+  taxon_environment,
+  motility,
+  life_habit,
+  diet,
+  reproduction,
+  ontogeny,
+  ecospace_comments
+)
+
+try(rm(csv_file, mollusca))
+```
+
+```{r}
+#set to genus level
+data <- occs %>% select(
+  genus,
+  early_interval,
+  late_interval,
+  max_ma,
+  min_ma,
+  paleolng,
+  paleolat,
+  motility,
+  life_habit,
+  diet
+)
+
+
+#functional options
+motility <- unique(data$motility)
+lifehabit <- unique(data$life_habit)
+diet <- unique(data$diet)
+
+#synonimize functional groups
+library(tidyverse)
+data <- data %>% mutate(
+  motile = fct_collapse(motility,
+                        "fast_mob"   = c("fast-moving", "actively mobile"),
+                        "slow_mob"   = "slow-moving",
+                        "unatt_fac"  = c("facultatively mobile"),
+                        "att_fac"    = c("passively mobile", "passively mobile, epibiont", "facultatively mobile, attached"),
+                        "unatt_stat" = c("stationary"),
+                        "att_stat"   = c("stationary, attached", "stationary, attached, epibiont")
+  ),
+  tier = fct_collapse(life_habit,
+                      "pelagic"       = c( "nektonic", "nektobenthic"),
+                      "erect"         = c("intermediate-level epifaunal, gregarious", "intermediate-level epifaunal"),
+                      "surficial"     = c("epifaunal", "epifaunal, gregarious", "low-level epifaunal", "epifaunal, solitary"),
+                      "semi_infaunal" = c("boring", "semi-infaunal", "semi-infaunal, gregarious"),
+                      "shallow_inf"   = c("infaunal", "shallow infaunal"),
+                      "deep_inf"      = c("deep infaunal")
+  ),
+  feeding = fct_collapse(diet,
+                         "suspension" = c("deposit feeder, suspension feeder", "suspension feeder", "suspension feeder, chemosymbiotic", "detritivore, suspension feeder", "chemosymbiotic, suspension feeder", "photosymbiotic, suspension feeder", "suspension feeder, detritivore"),
+                         "deposit"    = c("deposit feeder", "deposit feeder, chemosymbiotic"),
+                         "grazing"    = c("grazer", "grazer, suspension feeder", "omnivore, grazer",  "grazer, carnivore"),
+                         "predatory"  = c("carnivore"),
+                         "symbiosis"  = c("photosymbiotic", "chemosymbiotic"),
+                         "vague" = c("herbivore", "detritivore", "omnivore", "coprophage")
+                         ),
+      feeding       = replace(feeding      , feeding       %in% c(  "vague"), NA) #get rid of occs with vague designation
+)
+
+#set level order
+data$motile <-  factor(data$motile  , levels = c( 
+                        "fast_mob",
+                        "slow_mob",
+                        "unatt_fac",
+                        "att_fac",
+                        "unatt_stat",
+                        "att_stat" ))
+data$tier <-  factor(data$tier  , levels = c( 
+                        "pelagic",
+                        "erect",
+                        "surficial",
+                        "semi_infaunal",
+                        "shallow_inf",
+                        "deep_inf" ))
+data$feeding <-  factor(data$feeding  , levels = c( 
+                        "suspension",
+                        "deposit",
+                        "grazing",
+                        "predatory",
+                        "symbiosis" ))
+
+
+#all these fields are necessary so omit any points lacking info
+data <- data[rowSums(is.na(data)) == 0,]
+
+#verify outcome
+motility <- unique(data$motile)
+lifehabit <- unique(data$tier)
+diet <- unique(data$feeding)
+
+try(rm(cols, diet, lifehabit, motility))
+```
+
+## Set Up Time Bins
+```{r}
+#set up time bins
+#calculate average between max and min Ma age
+data <- data %>% mutate(
+  "avg_age" = (data$max_ma + data$min_ma)/2
+)
+
+#optionally, visualize spread of age data
+#hist(data$avg_age)
+#hist(data$max_ma)
+#hist(data$min_ma)
+
+#remove duplicate rows
+data_subset <- data %>% select(
+  genus,
+  avg_age,
+  early_interval,
+  late_interval,
+  max_ma,
+  min_ma,
+  paleolng,
+  paleolat,
+  motile,
+  tier,
+  feeding
+)
+data_subset <- data_subset[!duplicated(data_subset), ]
+```
+
+```{r}
+library(deeptime) # plotting geological time scale
+library(iNEXT) # diversity metrics and sampling standarisation tools
+library(divDyn)
+
+#get stages from divDyn package
+data(stages, package="divDyn") #get all stages
+stages <- stages %>% filter( #filter to Cret and Pg
+  system %in% c("Cretaceous", "Paleogene")
+)
+```
+
+## Taxonomic Diversity
+
+Sample standardization for diversity estimates can be done in a variety of ways, including Shareholder Quorum Subsampling (SQS) and squares. 
+
+### Interpolation and extrapolation of Hill number with order q
+```{r}
+#iNEXT: Interpolation and extrapolation of Hill number with order q
+
+#from Emma Dunne, Analytical Paleobiology Workshop, 2024
+## In the incidence frequencies, the first entry of each list object is the total number of 
+##    sampling units, followed by the taxa incidence frequencies
+##    For example: Interval_A : 150 99 96 80 74 68 60 54 46 45
+##      = there are 150 taxa in Interval_A, 99 in the first collection, 96 in the second, etc.
+
+
+## Genus incidence frequencies for each interval
+## This loop computes incidence frequencies for each interval in the stages data:
+freq_data <- lapply(1:nrow(stages), function(i) {
+  tmp <- data_subset %>% dplyr::filter(max_ma >= stages[i,"bottom"] & min_ma <= stages[i,"top"]) %>% 
+    count(., genus) %>% arrange(desc(n)) %>% # count no. genera in each interval
+    add_row(n = sum(.$n), .before = 1) %>% # find total number of genera
+    select(n)
+  freq_raw <- as.numeric(tmp$n) 
+  freq_raw
+})
+names(freq_data) <- stages$interval_name # give each list element its correct interval name
+str(freq_data) # call up the list to see a summary of its structure
+
+## Rarefaction and extrapolation
+inc_data <- iNEXT(freq_data, q = 0, datatype = "incidence_freq")
+
+#$iNextEst shows size- and coverage-based diversity estimates along with related
+##    statistics for a series of rarefied and extrapolated samples
+cov_rare <- inc_data$iNextEst # extract these data from the output lists
+```
+
+```{r}
+#plots of iNEXT results - how does diversity compare with sampling completeness?
+
+## Sample-size-based R/E curve (type=1) - plots diversity estimates with confidence 
+## intervals (if se=TRUE) as a function of sample size 
+ggiNEXT(inc_data, type=1, facet.var="None", se=TRUE) + theme_minimal()
+
+## Sample completeness curve (type=2) with confidence intervals - plots 
+## the sample coverage with respect to sample size 
+ggiNEXT(inc_data, type=2) + theme_minimal()
+
+## Coverage-based R/E curve (type=3) - plots the diversity estimates with 
+## confidence intervals as a function of sample coverage up to the maximum coverage
+ggiNEXT(inc_data, type=3) + theme_minimal()
+```
+
+## SQS
+```{r}
+
+# 4. Shareholder Quorum Subsampling (SQS) ---------------------------------
+
+
+## Shareholder Quorum Subsampling (SQS) uses rank-order abundance to estimate diversity 
+##    through subsampling at different degrees of sampling coverage, or 'quorum levels', 
+##    and estimates diversity using a metric called Good's u. 
+
+## We will use the package iNEXT, which estimates diversity using Hill numbers via 
+##    subsampling with the equations of Chao and Jost (2012), and also implements extrapolation, 
+##    using the Chao1 estimator - for more info, see Hsieh et al. (2016):
+
+
+## Start by creating a vector of quorum levels that we want to compute
+## 0.4 is considered the 'standard', but the fashion now is to plot multiple quorum levels
+quorum_levels <- round(seq(from = 0.3, to = 0.7, by = 0.1), 1)
+
+## And create a new list to store output
+estD_output <- list() 
+
+## Compute estimateD() for each interval
+## This make take a few moments to run, depending on the speed of your computer
+for(i in 1:length(quorum_levels)) {
+  # estimateD function running over each quorum level:
+  estD_tmp <- estimateD(freq_data, datatype = "incidence_freq", base = "coverage", level = quorum_levels[i])
+  # filter to the correct diversity estimates (order = 1):
+  estD_tmp <- filter(estD_tmp, Order.q == 1)
+  # organise the output:
+  estD_tmp$quorum_level <- quorum_levels[i]
+  estD_tmp$mid_ma <- stages$mid
+  # add the output to the newly created list:
+  estD_output[[i]] <- estD_tmp
+}
+
+## The output is a 'list' object so we'll need to convert it into a dataframe and clean it up before plotting
+estD_plotting <- bind_rows(estD_output) # binds rows of a list
+
+## Ensure that the quorum level column is being treated as a 'factor' to avoid errors while plotting:
+estD_plotting$quorum_level <- as.factor(estD_plotting$quorum_level)
+
+## Create a colour gradient for as many colours as you have quorum levels:
+col_gradient <- scales::seq_gradient_pal("#285e93", "#d492d2", "Lab")(seq(0, 1, length.out = 5))
+
+## Set your interval boundaries:
+int_boundaries <- c(143.1, 137.7, 132.6, 126.5, 121.4, 113.2, 100.5, 93.9, 
+                    89.39, 85.7, 83.65, 72.17, 66.04, 61.66, 56, 48.07,
+                    41.03, 37.71, 33.9, 27.29)
+
+## Construct the plot in ggplot
+iNEXT_plot <- ggplot(estD_plotting, aes(x = mid_ma, y = qD, ymin = qD.LCL, ymax = qD.UCL, colour = quorum_level)) + 
+  ## Each quorum level is called individually to be plotted:
+  geom_ribbon(data = subset(estD_plotting, quorum_level == 0.3), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[1], alpha = 0.2) +
+  geom_ribbon(data = subset(estD_plotting, quorum_level == 0.4), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[2], alpha = 0.2) +
+  geom_ribbon(data = subset(estD_plotting, quorum_level == 0.5), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[3], alpha = 0.2) +
+  geom_ribbon(data = subset(estD_plotting, quorum_level == 0.6), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[4], alpha = 0.2) +
+  geom_ribbon(data = subset(estD_plotting, quorum_level == 0.7), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[4], alpha = 0.2) +
+  ## Set our line and point sizes (and shapes):
+  geom_line(linewidth = 1) +
+  geom_point(aes(pch = Method), size = 4.5) +
+  scale_shape_manual(values=c(15, 16, 17)) +
+  ## Add our colours, theme, and axes labels:
+  scale_colour_manual(values = col_gradient) +
+  scale_x_reverse(breaks = int_boundaries) +
+  labs(x = "Time (Ma)", y = "Coverage rarified genus richness") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=.5))
+iNEXT_plot # Call the plot to the plots tab
+
+
+## Let's add a scale using the deeptime package, which can be used with ggplot2:
+iNEXT_plot_stages <- iNEXT_plot + coord_geo(xlim = c(max(stages$bottom), min(stages$top)), pos = "bottom",
+                                            dat ="stages",
+                                            height = unit(1.5, "lines"), rot = 0, size = 2.5, abbrv = TRUE) 
+iNEXT_plot_stages 
+
+## We can also add periods and stages together (epochs can be added too!):
+iNEXT_plot_stages_periods <- iNEXT_plot + coord_geo(xlim = c(max(stages$bottom), min(stages$top)), pos = as.list(rep("bottom",2)),
+                                                    dat = list("stages","periods"),
+                                                    height = list(unit(1.5, "lines"),unit(1.5,"lines")), rot = list(0,0), size = list(2.5, 2.5), abbrv = list(TRUE, FALSE))
+iNEXT_plot_stages_periods
+```
+
+## Functional Diversity
+```{r}
+#add guild value to dataset
+funct <- data_subset %>%
+  mutate(
+    guild = as.integer(
+      interaction(motile, feeding, tier, drop = TRUE) #assign an integer value to each unique trait combo
+    )
+  )
+```
+
+```{r}
+#calculate diversity metrics now using "Guild" as the "taxon" equivalent
+
+#rarefaction
+## This loop computes incidence frequencies for each interval in the stages data:
+freq_funct <- lapply(1:nrow(stages), function(i) {
+  tmp <- funct %>% dplyr::filter(max_ma >= stages[i,"bottom"] & min_ma <= stages[i,"top"]) %>% 
+    count(., guild) %>% arrange(desc(n)) %>% # count no. genera in each interval
+    add_row(n = sum(.$n), .before = 1) %>% # find total number of genera
+    select(n)
+  freq_raw <- as.numeric(tmp$n) 
+  freq_raw
+})
+names(freq_funct) <- stages$interval_name # give each list element its correct interval name
+str(freq_funct) # call up the list to see a summary of its structure
+
+## Rarefaction and extrapolation
+inc_data_funct <- iNEXT(freq_funct, q = 0, datatype = "incidence_freq")
+#for now
+inc_data_funct <- inc_data
+
+#$iNextEst shows size- and coverage-based diversity estimates along with related
+##    statistics for a series of rarefied and extrapolated samples
+cov_rare <- inc_data_funct$iNextEst # extract these data from the output lists
+```
+
+```{r}
+#plots of iNEXT results - how does diversity compare with sampling completeness?
+
+## Sample-size-based R/E curve (type=1) - plots diversity estimates with confidence 
+## intervals (if se=TRUE) as a function of sample size 
+ggiNEXT(inc_data_funct, type=1, facet.var="None", se=TRUE) + theme_minimal()
+
+## Sample completeness curve (type=2) with confidence intervals - plots 
+## the sample coverage with respect to sample size 
+ggiNEXT(inc_data_funct, type=2) + theme_minimal()
+
+## Coverage-based R/E curve (type=3) - plots the diversity estimates with 
+## confidence intervals as a function of sample coverage up to the maximum coverage
+ggiNEXT(inc_data_funct, type=3) + theme_minimal()
+```
+
+```{r}
+## Start by creating a vector of quorum levels that we want to compute
+## 0.4 is considered the 'standard', but the fashion now is to plot multiple quorum levels
+quorum_levels <- round(seq(from = 0.3, to = 0.7, by = 0.1), 1)
+
+## And create a new list to store output
+F_estD_output <- list() 
+
+## Compute estimateD() for each interval
+## This make take a few moments to run, depending on the speed of your computer
+for(i in seq_along(quorum_levels)) {
+  # estimateD function running over each quorum level:
+  F_estD_tmp <- estimateD(freq_funct, datatype = "incidence_freq", base = "coverage", level = quorum_levels[i])
+  # filter to the correct diversity estimates (order = 1):
+  F_estD_tmp <- filter(F_estD_tmp, Order.q == 1)
+  # organise the output:
+  F_estD_tmp$quorum_level <- quorum_levels[i]
+  F_estD_tmp$mid_ma <- as.numeric(stages$mid)
+  # add the output to the newly created list:
+  F_estD_output[[i]] <- F_estD_tmp
+}
+
+## The output is a 'list' object so we'll need to convert it into a dataframe and clean it up before plotting
+F_estD_plotting <- bind_rows(F_estD_output) # binds rows of a list
+
+## Ensure that the quorum level column is being treated as a 'factor' to avoid errors while plotting:
+F_estD_plotting$quorum_level <- as.factor(F_estD_plotting$quorum_level)
+
+## Create a colour gradient for as many colours as you have quorum levels:
+col_gradient <- scales::seq_gradient_pal("#285e93", "#d492d2", "Lab")(seq(0, 1, length.out = 5))
+
+## Set your interval boundaries:
+int_boundaries <- c(143.1, 137.7, 132.6, 126.5, 121.4, 113.2, 100.5, 93.9, 
+                    89.39, 85.7, 83.65, 72.17, 66.04, 61.66, 56, 48.07,
+                    41.03, 37.71, 33.9, 27.29)
+## Construct the plot in ggplot
+F_iNEXT_plot <- ggplot(F_estD_plotting, aes(x = mid_ma, y = qD, ymin = qD.LCL, ymax = qD.UCL, colour = quorum_level)) + 
+  ## Each quorum level is called individually to be plotted:
+  geom_ribbon(data = subset(F_estD_plotting, quorum_level == 0.3), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[1], alpha = 0.2) +
+  geom_ribbon(data = subset(F_estD_plotting, quorum_level == 0.4), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[2], alpha = 0.2) +
+  geom_ribbon(data = subset(F_estD_plotting, quorum_level == 0.5), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[3], alpha = 0.2) +
+  geom_ribbon(data = subset(F_estD_plotting, quorum_level == 0.6), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[4], alpha = 0.2) +
+  geom_ribbon(data = subset(F_estD_plotting, quorum_level == 0.7), aes(x = mid_ma, ymin = qD.LCL, ymax = qD.UCL), inherit.aes = FALSE, fill = col_gradient[5], alpha = 0.2) +
+  ## Set our line and point sizes (and shapes):
+  geom_line(linewidth = 1) +
+  geom_point(aes(pch = Method), size = 4.5) +
+  scale_shape_manual(values=c(15, 16, 17)) +
+  ## Add our colours, theme, and axes labels:
+  scale_colour_manual(values = col_gradient) +
+  scale_x_reverse(breaks = int_boundaries) +
+  labs(x = "Time (Ma)", y = "Coverage rarified functional richness") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=.5)) 
+F_iNEXT_plot # Call the plot to the plots tab
+
+
+## Let's add a scale using the deeptime package, which can be used with ggplot2:
+F_iNEXT_plot_stages <- F_iNEXT_plot + coord_geo(xlim = c(max(stages$bottom), min(stages$top)), ylim = c(0, 10), pos = "bottom",
+                                            dat ="stages",
+                                            height = unit(1.5, "lines"), rot = 0, size = 2.5, abbrv = TRUE) 
+F_iNEXT_plot_stages 
+
+## We can also add periods and stages together (epochs can be added too!):
+F_iNEXT_plot_stages_periods <- F_iNEXT_plot + coord_geo(xlim = c(max(stages$bottom), min(stages$top)), ylim = c(0, 10), pos = as.list(rep("bottom",2)),
+                                                    dat = list("stages","periods"),
+                                                    height = list(unit(1.5, "lines"),unit(1.5,"lines")), rot = list(0,0), size = list(2.5, 2.5), abbrv = list(TRUE, FALSE))
+F_iNEXT_plot_stages_periods
+```
+## Squares
+
+```{r}
+# 5.Squares ------------------------------------------------------------------
+
+## Squares is an extrapolator and coverage-based approach which performs well when the 
+##    rank abundance distributions of samples are particularly strongly skewed 
+##    (i.e. there are many rare taxa, as is often the case with fossil data)
+## In other words, the Chao1 estimator from estimateD() in iNEXT above, assumes that  
+##    abundance distributions are uniform. Squares attempts to correct this by not  
+##    making this assumption
+## You can find out more information in the original publication: Alroy (2020):
+##    https://doi.org/10.1017/pab.2019.40
+
+
+## Just like we did for the analysis above, we need to get the genus incidence frequencies 
+##    for each interval, but this time we don't need the totals at the beginning of the string
+freq_data_sq <- lapply(1:nrow(stages), function(i) {
+  tmp <- data_subset %>% filter(max_ma >= stages[i,"bottom"] & min_ma <= stages[i,"top"]) %>% 
+    count(., genus) %>% arrange(desc(n)) %>% 
+    select(n)
+  freq_raw <- as.numeric(tmp$n)
+  freq_raw
+})
+names(freq_data_sq) <- stages$stage # give each list element its correct interval name
+
+## Using these data, you can plot rank abundances for each interval
+## Let's look at the Danian:
+barplot(freq_data_sq[["Danian"]], log = "y", # log the y-axis
+        col = "#aed9e0", border = 0, space = 0,
+        xlab = "Rank order", ylab = "Abundance")
+
+
+## Now let's get estimating diversity using squares
+## The code used here is adapted from Dr Bethany Allen's tutorial:
+##    https://github.com/bethany-j-allen/sampling_bias_workshop/blob/master/Code/3_SQSAndSquares.R
+
+## Start by making an empty vector to store the squares estimates in:
+squares_list <- vector("numeric", length = 0)
+
+## Then loop through each stage:
+for(i in 1:length(freq_data_sq)) {
+  # filter the rank-abundance string of the stage of interest:
+  count_list <- freq_data_sq[[i]]
+  # Compute counts:
+  genus_count <- length(count_list) # total number of genera in the string:
+  sing_count <- sum(count_list == 1) # number of singletons (the number of genera in the string with an abundance of 1):
+  ind_count <- sum(count_list) # number of individuals (the sum of the string):
+  # Find the sum of the string squared (this is where the name comes from):
+  sum_nsq <- sum(count_list^2)
+  # Put input parameters into the squares equation:
+  squares <- genus_count + (((sing_count^2)*sum_nsq)/((ind_count^2) - (sing_count*genus_count)))
+  # Because the equation is a fraction, you can get an estimate of infinity if all taxa are singletons. 
+  # As a safeguard against that, if the estimate comes out as infinite, we replace it with the observed genus count:
+  if(squares == Inf){squares <- genus_count}
+  # Finally add the squares estimate to the end of the vector:
+  squares_list <- append(squares_list, squares)
+}
+
+## Label the squares estimates with their midpoints:
+to_plot <- data.frame(squares_list, stages$mid)
+## Rename the mid_ma column to keep things tidy:
+to_plot <- rename(to_plot, "mid" = "stages.mid")
+
+## And finally, plot these data!
+squares_plot <- ggplot(to_plot, aes(x = mid, y = squares_list)) +
+  geom_line(colour = "#54a550", linewidth = 1) + 
+  geom_point(colour = "#54a550", size = 4, shape = 16) +
+  scale_x_reverse(breaks = int_boundaries) + 
+  labs(x = "Time (Ma)", y = "Squares genus diversity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=.5)) 
+squares_plot # call to plot tab
+
+sq_plot_stages_periods <- squares_plot + coord_geo(xlim = c(max(stages$bottom), min(stages$top)), pos = as.list(rep("bottom",2)),
+                                                    dat = list("stages","periods"),
+                                                    height = list(unit(1.5, "lines"),unit(1.5,"lines")), rot = list(0,0), size = list(2.5, 2.5), abbrv = list(TRUE, FALSE))
+sq_plot_stages_periods
+
+
+```
+```{r}
+#functional diversity
+
+## Just like we did for the analysis above, we need to get the genus incidence frequencies 
+##    for each interval, but this time we don't need the totals at the beginning of the string
+funct_data_sq <- lapply(1:nrow(stages), function(i) {
+  tmp <- funct %>% filter(max_ma >= stages[i,"bottom"] & min_ma <= stages[i,"top"]) %>% 
+    count(., guild) %>% arrange(desc(n)) %>% 
+    select(n)
+  freq_raw <- as.numeric(tmp$n)
+  freq_raw
+})
+
+names(funct_data_sq) <- stages$stage # give each list element its correct interval name
+
+## Start by making an empty vector to store the squares estimates in:
+squares_list <- vector("numeric", length = 0)
+
+## Then loop through each stage:
+for(i in 1:length(funct_data_sq)) {
+  # filter the rank-abundance string of the stage of interest:
+  count_list <- funct_data_sq[[i]]
+  # Compute counts:
+  genus_count <- length(count_list) # total number of genera in the string:
+  sing_count <- sum(count_list == 1) # number of singletons (the number of genera in the string with an abundance of 1):
+  ind_count <- sum(count_list) # number of individuals (the sum of the string):
+  # Find the sum of the string squared (this is where the name comes from):
+  sum_nsq <- sum(count_list^2)
+  # Put input parameters into the squares equation:
+  squares <- genus_count + (((sing_count^2)*sum_nsq)/((ind_count^2) - (sing_count*genus_count)))
+  # Because the equation is a fraction, you can get an estimate of infinity if all taxa are singletons. 
+  # As a safeguard against that, if the estimate comes out as infinite, we replace it with the observed genus count:
+  if(squares == Inf){squares <- genus_count}
+  # Finally add the squares estimate to the end of the vector:
+  squares_list <- append(squares_list, squares)
+}
+
+## Label the squares estimates with their midpoints:
+to_plot <- data.frame(squares_list, stages$mid)
+## Rename the mid_ma column to keep things tidy:
+to_plot <- rename(to_plot, "mid" = "stages.mid")
+
+## And finally, plot these data!
+F_squares_plot <- ggplot(to_plot, aes(x = mid, y = squares_list)) +
+  geom_line(colour = "#54a550", linewidth = 1) + 
+  geom_point(colour = "#54a550", size = 4, shape = 16) +
+  scale_x_reverse(breaks = int_boundaries) + 
+  labs(x = "Time (Ma)", y = "Squares functional diversity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=.5)) 
+F_squares_plot # call to plot tab
+
+F_sq_plot_stages_periods <- F_squares_plot + coord_geo(xlim = c(max(stages$bottom), min(stages$top)), pos = as.list(rep("bottom",2)),
+                                                    dat = list("stages","periods"),
+                                                    height = list(unit(1.5, "lines"),unit(1.5,"lines")), rot = list(0,0), size = list(2.5, 2.5), abbrv = list(TRUE, FALSE))
+F_sq_plot_stages_periods
+
+
+```
+```
+

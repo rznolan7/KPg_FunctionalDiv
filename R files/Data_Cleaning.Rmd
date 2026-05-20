@@ -1,0 +1,203 @@
+---
+title: "FunctionalKPg"
+output: html_document
+date: "2026-01-23"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{R}
+#install necessary packages
+if (!require(rstudioapi)){install.packages("rstudioapi")}
+me <- (rstudioapi::getActiveDocumentContext()$path) #get current file name
+
+if (!require(renv)){ install.packages("renv")}
+
+#because I use an old version of iNEXT
+if(!require(iNEXT)){remotes::install_version("iNEXT", version = "2.0.20")}
+
+packs <- unique(renv::dependencies(me)$Package) #list of packages needed 
+
+for (i in seq_along(packs)){
+  if (!require(packs[i], character.only=T)){ #install any missing pacls
+    install.packages(packs[i])
+  }
+}
+
+lapply(packs, library, character.only=T) #load packages
+
+rm(me, packs, i) #clean env
+
+#set wd to source file path
+wd <- dirname(dirname(rstudioapi::getSourceEditorContext()$path))
+setwd(wd)
+```
+
+
+##Paleobiology Database
+
+```{r}
+#set wd to Data folder
+dwd <- paste0(wd, "/Data")
+
+path <- paste0(dwd, "/pbdb_mollusca.RData")
+load(file = path)
+
+#set folder to save iterations to
+results_folder <- paste0(wd, "/", "Cleaning_Iterations")
+
+#list of columns that are available
+cols <- colnames(mollusca)
+
+#dataframe for data to be removed
+remove_data <- data.frame()
+```
+
+```{r}
+#select columns from mollusca to use for cleaning
+#occurrence_no is a unique identifier so we can use that to subset from original dataset and get useful cols later
+
+library(dplyr)
+#filter for basis of functional characters
+funct_basis <- mollusca %>% select(
+  occurrence_no,
+  phylum,
+  class,
+  order,
+  family,
+  genus,
+  taxon_environment,
+  environment_basis,
+  motility,
+  motility_basis,
+  life_habit,
+  life_habit_basis,
+  diet,
+  diet_basis,
+  ref_author,
+  ref_pubyr)
+
+#filter out records where the basis for one of the functional traits is phylum, class or order (look at these carefully)
+funct_traits <- c("motility_basis", "life_habit_basis", "diet_basis")
+
+flagged <- list()
+
+#flag any functional trait whose basis is at the phylum, class or order level, or is blank
+for (i in seq_along(funct_traits)){
+  name <- paste0(funct_traits[i], "_flag")
+  issue_occs <- funct_basis %>% filter(
+    get(funct_traits[i]) == phylum |
+    get(funct_traits[i]) == class |
+    get(funct_traits[i]) == order |
+    get(funct_traits[i]) == ""
+  )
+  flagged[[name]] <- issue_occs
+}
+  
+flagged_funct <- rbind(flagged[[1]], flagged[[2]], flagged[[3]]) #get all the issue entries together
+flagged_funct <- flagged_funct[!duplicated(flagged_funct$occurrence_no),] #delete duplicate occurrences
+
+write.csv(flagged_funct, file = paste0(results_folder, "/flagged_funct.csv"))
+
+genera_to_check <- flagged_funct[!duplicated(flagged_funct$genus),c("occurrence_no", "genus", "ref_author", "ref_pubyr")]
+
+write.csv(genera_to_check, file = paste0(results_folder, "/flagged_genera.csv"))
+
+#from here, go to csv file and go through each genus to find functional information, and compile into a database of "vetted" data
+
+try(rm(flagged, issue_occs, funct_traits, i, name)) #clean env
+```
+
+
+```{r}
+#filter for age resolution
+library(dplyr)
+age <- mollusca %>% select(
+  occurrence_no,
+  early_interval,
+  late_interval,
+  max_ma,
+  max_ma_error,
+  max_ma_method,
+  min_ma,
+  min_ma_error,
+  min_ma_method,
+  direct_ma_value,
+  direct_ma_error,
+  direct_ma_method,
+  formation,
+  member,
+  spatial_resolution,
+  collection_dates,
+  ref_author,
+  ref_pubyr
+  )
+
+#flag occurrences where max and min age are more than 2 Ma apart -bin too big
+flagged_age <- age %>% filter(
+  max_ma - min_ma > 2
+)
+
+#get list of all the formations present in flagged dataset
+formations <- flagged_age[!duplicated(flagged_age$formation),]
+
+write.csv(formations, file = paste0(results_folder, "/flagged_formations.csv"))
+
+#from here go through this spreadsheet and find time constraints for the formations with large gaps in time
+
+```
+
+```{r}
+#filter for location basis
+library(dplyr)
+latlng <- mollusca %>% select(
+  occurrence_no,
+  lat,
+  lng,
+  latlng_basis,
+  
+)
+```
+
+```{r}
+#go through flagged database and verify entries
+
+#load the flagged functional data if its not still in the environment
+if(!exists("flagged_funct")){
+  funct_basis <- read.csv(paste0(results_folder, "/flagged_funct.csv"))
+} else{ print("Already there!")}
+
+#call reassigning_traits.R to run function based on trait corrections  
+source(paste0(wd, "/reassigning_traits.R"))
+
+reassigned_funct <- 
+
+#a new object in which to put things to remove
+no_gos <- flagged_funct[c(),]
+
+#add bad functional data to list for removal
+remove_data <- rbind(no_gos$occurrence_no)
+
+```
+
+```{r}
+#new mollusca database with changes
+
+#remove occs that got put in the "remove data" pile
+mollusca_cleaned <- mollusca[!mollusca$occurrence_no %in% remove_data$occurrence_no]
+
+#change occs that got filtered to correct entries
+mollusca_cleaned <- mollusca_cleaned[!mollusca_cleaned$occurrence_no %in% altered_data$occurrence_no] #delete original rows
+mollusca_cleaned <- rbind(mollusca_cleaned, altered_data) #row bind altered rows
+
+```
+
+## Coban Database
+```{r}
+#
+```
+
